@@ -98,30 +98,33 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Set up AWS clients
+
+
 @st.cache_resource
 def get_aws_clients():
     try:
         # First, try to use environment variables or instance profile
         s3_client = boto3.client('s3')
-        
+
         # Check if Bedrock agent is available in the region
         bedrock_regions = boto3.Session().get_available_regions('bedrock-agent-runtime')
         current_region = boto3.Session().region_name
-        
+
         # If the current region doesn't support Bedrock, use us-east-1
         bedrock_region = current_region if current_region in bedrock_regions else 'us-east-1'
-        
+
         bedrock_agent_client = boto3.client(
-            'bedrock-agent-runtime', 
+            'bedrock-agent-runtime',
             region_name=bedrock_region
         )
-        
+
         return s3_client, bedrock_agent_client
     except Exception as e:
         st.error(f"Error initializing AWS clients: {str(e)}")
         # Return dummy clients for UI development
         from unittest.mock import MagicMock
         return MagicMock(), MagicMock()
+
 
 try:
     s3_client, bedrock_agent_client = get_aws_clients()
@@ -137,6 +140,8 @@ AGENT_ID = os.environ.get('AGENT_ID', '')
 AGENT_ALIAS_ID = os.environ.get('AGENT_ALIAS_ID', 'TSTALIASID')
 
 # Helper functions to read data
+
+
 @st.cache_data(ttl=300)
 def read_s3_csv(bucket, key):
     """Read CSV data from S3"""
@@ -148,6 +153,7 @@ def read_s3_csv(bucket, key):
     except Exception as e:
         st.error(f"Error reading CSV from S3: {str(e)}")
         return None
+
 
 @st.cache_data(ttl=300)
 def read_s3_json(bucket, key):
@@ -165,120 +171,133 @@ def read_s3_json(bucket, key):
         return None
 
 # Function to interact with Bedrock Agent
+
+
 def generate_email_with_agent(segment_id):
     session_id = f"demo-session-{int(time.time())}"
-    
-    # Display a message for debugging
-    st.info("Connecting to Bedrock Agent... This may take a moment.")
-    
+
+    # Show debugging info
+    st.info(f"Connecting to Bedrock Agent... Agent ID: {AGENT_ID[:6]}...")
+
+    # Get flight details to customize the prompting
+    flight_df = read_s3_csv(BUCKET_NAME, 'data/travel_items.csv')
+    flight_details = None
+
+    if flight_df is not None:
+        matching_flight = flight_df[flight_df['ITEM_ID'] == segment_id]
+        if not matching_flight.empty:
+            flight_details = matching_flight.iloc[0]
+            st.info(
+                f"Flight found: {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} ({flight_details['AIRLINE']})")
+
     try:
-        # Check if Agent ID and Alias ID are provided
-        if not AGENT_ID or AGENT_ID == '':
-            st.warning("Agent ID is not configured. Using mock response for demo purposes.")
-            # Return a mock response for demo purposes
-            return f"""Subject: Exclusive Deal: Fly from Manila to London This March!
+        # Create a more specific prompt using flight details
+        prompt = f"Generate an email marketing campaign for flight segment ID {segment_id}"
+        if flight_details is not None:
+            prompt = f"Generate an email marketing campaign for flight from {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} with {flight_details['AIRLINE']} in {flight_details['MONTH']}. Use segment ID {segment_id} to retrieve user information."
 
-Dear Valued Wanderly Traveler,
+        st.code(prompt, language="text")
 
-We're excited to offer you an exclusive opportunity to explore the historic city of London this March! 
+        # Debug AWS credentials
+        boto_session = boto3.Session()
+        st.success(f"AWS Region: {boto_session.region_name}")
 
-✈️ Manila to London
-🗓️ Travel Period: March 2023
-💰 Special Price: $5,999
-⭐ Duration: 10 days
-🛫 Airline: ButterflyWing Express
+        # Explicitly verify Bedrock Agent client configuration
+        agent_client = boto3.client(
+            'bedrock-agent-runtime',
+            region_name='us-east-1'  # Explicitly use us-east-1 for testing
+        )
 
-During your stay, you might enjoy:
-• Visiting the iconic Big Ben and Houses of Parliament
-• Exploring the British Museum's world-class collections
-• Taking a ride on the London Eye for panoramic city views
-• Enjoying afternoon tea at a traditional English tearoom
-
-Book now at https://demobooking.demo.co and use promo code LONDON23 to secure this special offer!
-
-Best regards,
-The Wanderly Team"""
-            
-        # First, ask the agent to generate an email for the segment
-        response = bedrock_agent_client.invoke_agent(
+        # Call the agent
+        response = agent_client.invoke_agent(
             agentId=AGENT_ID,
             agentAliasId=AGENT_ALIAS_ID,
             sessionId=session_id,
-            inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}",
+            inputText=prompt,
             enableTrace=True
         )
-        
-        # Extract the response - handle streaming response properly
+
+        # Let's debug the response type
+        st.success(f"Response type: {type(response)}")
+
+        # Stream handling for responses
         full_response = ""
-        
-        # Check response type and handle accordingly
-        if hasattr(response, 'get'):
-            # Non-streaming response
-            chunks = response.get('completion', {}).get('chunks', [])
-            for chunk in chunks:
-                if 'chunk' in chunk and 'message' in chunk['chunk']:
-                    content = chunk['chunk']['message']['content']
-                    if isinstance(content, list) and len(content) > 0:
-                        full_response += content[0].get('text', '')
+
+        # Handle streaming events
+        try:
+            for event in response:
+                # Show event type for debugging
+                event_type = type(event).__name__
+                st.info(f"Processing event type: {event_type}")
+
+                # Extract content based on event type
+                if hasattr(event, 'chunk'):
+                    if hasattr(event.chunk, 'message'):
+                        if hasattr(event.chunk.message, 'content'):
+                            for content_item in event.chunk.message.content:
+                                if hasattr(content_item, 'text'):
+                                    full_response += content_item.text
+        except Exception as e:
+            st.error(f"Error processing streaming response: {str(e)}")
+
+            # Try alternative approach
+            try:
+                # Convert response to a string and extract meaningful parts
+                response_str = str(response)
+                st.code(response_str[:500], language="json")
+
+                # Try to find recognizable text in response
+                import re
+                if "text" in response_str:
+                    matches = re.findall(
+                        r'"text"\s*:\s*"([^"]+)"', response_str)
+                    if matches:
+                        full_response = " ".join(matches)
+            except Exception as e2:
+                st.error(f"Alternative parsing failed: {str(e2)}")
+
+        # Check if we got any response
+        if full_response:
+            return full_response
         else:
-            # Streaming response
-            try:
-                for event in response:
-                    if hasattr(event, 'chunk') and hasattr(event.chunk, 'message'):
-                        message = event.chunk.message
-                        if hasattr(message, 'content') and len(message.content) > 0:
-                            full_response += message.content[0].text
-            except Exception as stream_error:
-                st.error(f"Error processing stream: {str(stream_error)}")
-                # Continue to fallback methods
-        
-        if not full_response:
-            # Fallback for different response formats
-            st.warning("Response format differs from expected. Using alternate parsing method.")
-            
-            # Convert response to string for inspection
-            response_str = str(response)
-            
-            # Try to extract directly from the raw response
-            try:
-                # Look for text patterns in the raw response
-                if '"text":' in response_str:
-                    # Extract text between quotes after "text":
-                    import re
-                    text_matches = re.findall(r'"text":\s*"([^"]*)"', response_str)
-                    full_response = ' '.join(text_matches)
-            except Exception as extract_error:
-                st.error(f"Failed to extract text from response: {extract_error}")
-                
-        return full_response if full_response else "No content could be extracted from the response."
-    except Exception as e:
-        st.error(f"Error invoking Bedrock agent: {str(e)}")
-        # For demo purposes, return a mock email
-        return f"""Subject: Exclusive Deal: Fly from Manila to London This March!
+            st.warning(
+                "No response content extracted. Using dynamic fallback template.")
+
+            # Create dynamic fallback based on flight details
+            if flight_details is not None:
+                src = flight_details['SRC_CITY']
+                dst = flight_details['DST_CITY']
+                airline = flight_details['AIRLINE']
+                month = flight_details['MONTH']
+                price = flight_details['DYNAMIC_PRICE']
+
+                return f"""Subject: Exclusive Deal: Fly from {src} to {dst} This {month}!
 
 Dear Valued Wanderly Traveler,
 
-We're excited to offer you an exclusive opportunity to explore the historic city of London this March! 
+We're excited to offer you an exclusive opportunity to explore {dst} this {month}! 
 
-✈️ Manila to London
-🗓️ Travel Period: March 2023
-💰 Special Price: $5,999
-⭐ Duration: 10 days
-🛫 Airline: ButterflyWing Express
+✈️ {src} to {dst}
+🗓️ Travel Period: {month} 2023
+💰 Special Price: ${price}
+⭐ Duration: {flight_details['DURATION_DAYS']} days
+🛫 Airline: {airline}
 
-During your stay, you might enjoy:
-• Visiting the iconic Big Ben and Houses of Parliament
-• Exploring the British Museum's world-class collections
-• Taking a ride on the London Eye for panoramic city views
-• Enjoying afternoon tea at a traditional English tearoom
-
-Book now at https://demobooking.demo.co and use promo code LONDON23 to secure this special offer!
+Book now at https://demobooking.demo.co and use promo code {dst.upper()}23 to secure this special offer!
 
 Best regards,
 The Wanderly Team"""
+            else:
+                return "Failed to generate email content. Could not retrieve flight details."
+
+    except Exception as e:
+        st.error(f"Error invoking Bedrock agent: {str(e)}")
+        return f"Error: {str(e)}"
+
 
 # Title
-st.markdown('<p class="main-header">Wanderly Email Campaign Generator</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-header">Wanderly Email Campaign Generator</p>',
+            unsafe_allow_html=True)
 st.markdown("Generate personalized marketing emails for flight promotions")
 st.markdown("---")
 
@@ -286,29 +305,34 @@ st.markdown("---")
 tab1, tab2 = st.tabs(["📋 Select Flight & View Segment", "✉️ Generate Email"])
 
 with tab1:
-    st.markdown('<p class="sub-header">1. Select Flight to Promote</p>', unsafe_allow_html=True)
-    
+    st.markdown('<p class="sub-header">1. Select Flight to Promote</p>',
+                unsafe_allow_html=True)
+
     # Load flight data
     flight_df = read_s3_csv(BUCKET_NAME, 'data/travel_items.csv')
-    
+
     if flight_df is not None:
         # Filter to only show March promotions as that's what we have segments for
-        promo_flights = flight_df[(flight_df['PROMOTION'] == 'Yes') & (flight_df['MONTH'] == 'March')]
-        
+        promo_flights = flight_df[(flight_df['PROMOTION'] == 'Yes') & (
+            flight_df['MONTH'] == 'March')]
+
         if promo_flights.empty:
             # If no March promotions, show all promotions as fallback
             promo_flights = flight_df[flight_df['PROMOTION'] == 'Yes']
-            st.warning("Note: Segmentation data is only available for March promotions. Other months shown as reference.")
-        
+            st.warning(
+                "Note: Segmentation data is only available for March promotions. Other months shown as reference.")
+
         if promo_flights.empty:
             st.warning("No promotional flights found.")
         else:
             # Display flights as a table
-            st.markdown('<div class="info-box">Select one of the available promotional flights below:</div>', unsafe_allow_html=True)
-            
+            st.markdown(
+                '<div class="info-box">Select one of the available promotional flights below:</div>', unsafe_allow_html=True)
+
             # Display table with flight IDs
             st.dataframe(
-                promo_flights[['ITEM_ID', 'SRC_CITY', 'DST_CITY', 'AIRLINE', 'MONTH', 'DYNAMIC_PRICE']].reset_index(drop=True),
+                promo_flights[['ITEM_ID', 'SRC_CITY', 'DST_CITY', 'AIRLINE',
+                               'MONTH', 'DYNAMIC_PRICE']].reset_index(drop=True),
                 column_config={
                     "ITEM_ID": "Flight ID",
                     "SRC_CITY": "From",
@@ -319,42 +343,46 @@ with tab1:
                 },
                 use_container_width=True
             )
-            
+
             # Option to directly copy-paste Flight ID
             selected_flight_id = st.text_input(
                 "Enter Flight ID (copy from table above):",
                 help="Copy the Flight ID directly from the table above"
             )
-            
+
             # Button to process the flight ID
             if st.button("Analyze User Segment", use_container_width=True):
                 if selected_flight_id.strip() == "":
                     st.error("Please enter a Flight ID first")
                 else:
                     # Check if flight ID exists
-                    matching_flight = promo_flights[promo_flights['ITEM_ID'] == selected_flight_id]
-                    
+                    matching_flight = promo_flights[promo_flights['ITEM_ID']
+                                                    == selected_flight_id]
+
                     if matching_flight.empty:
-                        st.error(f"Flight ID {selected_flight_id} not found in promotional flights")
+                        st.error(
+                            f"Flight ID {selected_flight_id} not found in promotional flights")
                     else:
                         st.session_state['selected_flight_id'] = selected_flight_id
                         st.session_state['flight_details'] = matching_flight.iloc[0]
-                        
+
                         # Show flight details and segment information on the same page
                         st.markdown("---")
-                        st.markdown('<p class="sub-header">2. User Segment Details</p>', unsafe_allow_html=True)
-                        
+                        st.markdown(
+                            '<p class="sub-header">2. User Segment Details</p>', unsafe_allow_html=True)
+
                         flight_details = matching_flight.iloc[0]
-                        
+
                         st.markdown(f"""
                         <div class="info-box">
                         Analyzing user segment for flight: {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} ({flight_details['AIRLINE']})
                         </div>
                         """, unsafe_allow_html=True)
-                        
+
                         # Load segment data
-                        segments = read_s3_json(BUCKET_NAME, 'segments/batch_segment_input_ab3.json.out')
-                        
+                        segments = read_s3_json(
+                            BUCKET_NAME, 'segments/batch_segment_input_ab3.json.out')
+
                         if segments:
                             # Find matching segment
                             matching_segment = None
@@ -362,27 +390,33 @@ with tab1:
                                 if segment.get('input', {}).get('itemId') == selected_flight_id:
                                     matching_segment = segment
                                     break
-                            
+
                             if matching_segment:
-                                user_list = matching_segment.get('output', {}).get('usersList', [])
+                                user_list = matching_segment.get(
+                                    'output', {}).get('usersList', [])
                                 st.session_state['user_list'] = user_list
-                                
+
                                 if user_list:
-                                    st.markdown(f'<div class="success-box">✅ Found {len(user_list)} users in this segment!</div>', unsafe_allow_html=True)
-                                    
+                                    st.markdown(
+                                        f'<div class="success-box">✅ Found {len(user_list)} users in this segment!</div>', unsafe_allow_html=True)
+
                                     # Load user data to show distribution
-                                    user_df = read_s3_csv(BUCKET_NAME, 'data/travel_users.csv')
+                                    user_df = read_s3_csv(
+                                        BUCKET_NAME, 'data/travel_users.csv')
                                     if user_df is not None:
-                                        segment_users = user_df[user_df['USER_ID'].isin(user_list)]
-                                        tier_counts = segment_users['MEMBER_TIER'].value_counts()
-                                        
+                                        segment_users = user_df[user_df['USER_ID'].isin(
+                                            user_list)]
+                                        tier_counts = segment_users['MEMBER_TIER'].value_counts(
+                                        )
+
                                         col1, col2 = st.columns(2)
-                                        
+
                                         with col1:
                                             # Display as pie chart
-                                            st.subheader("User Tier Distribution")
+                                            st.subheader(
+                                                "User Tier Distribution")
                                             st.bar_chart(tier_counts)
-                                        
+
                                         with col2:
                                             st.subheader("User Demographics")
                                             st.markdown(f"""
@@ -391,104 +425,123 @@ with tab1:
                                             - **Silver members:** {tier_counts.get('Silver', 0)}
                                             - **Regular members:** {tier_counts.get('Member', 0)}
                                             """)
-                                        
-                                        st.markdown('<div class="info-box">Now you can go to the "Generate Email" tab to create an email campaign for this segment</div>', unsafe_allow_html=True)
-                                        
+
+                                        st.markdown(
+                                            '<div class="info-box">Now you can go to the "Generate Email" tab to create an email campaign for this segment</div>', unsafe_allow_html=True)
+
                                         # Show a sample of user IDs
                                         with st.expander("View Sample User IDs"):
                                             st.write(user_list[:10])
-                                            st.info(f"Showing 10 of {len(user_list)} users")
+                                            st.info(
+                                                f"Showing 10 of {len(user_list)} users")
                                     else:
                                         st.error("Could not load user data")
                                 else:
-                                    st.warning("No users found in this segment")
+                                    st.warning(
+                                        "No users found in this segment")
                             else:
                                 # No exact match found, show all available segments
-                                st.warning(f"No exact segment match found for flight ID: {selected_flight_id}")
-                                
+                                st.warning(
+                                    f"No exact segment match found for flight ID: {selected_flight_id}")
+
                                 # Display all available segments as an alternative
                                 segment_options = []
                                 for segment in segments:
-                                    item_id = segment.get('input', {}).get('itemId')
-                                    user_count = len(segment.get('output', {}).get('usersList', []))
-                                    segment_options.append({"item_id": item_id, "user_count": user_count})
-                                
+                                    item_id = segment.get(
+                                        'input', {}).get('itemId')
+                                    user_count = len(segment.get(
+                                        'output', {}).get('usersList', []))
+                                    segment_options.append(
+                                        {"item_id": item_id, "user_count": user_count})
+
                                 st.markdown("Available segments:")
                                 for option in segment_options:
                                     if option["item_id"] in flight_df['ITEM_ID'].values:
-                                        flight_info = flight_df[flight_df['ITEM_ID'] == option["item_id"]].iloc[0]
-                                        st.markdown(f"- {flight_info['SRC_CITY']} to {flight_info['DST_CITY']} - {option['user_count']} users (ID: {option['item_id']})")
+                                        flight_info = flight_df[flight_df['ITEM_ID']
+                                                                == option["item_id"]].iloc[0]
+                                        st.markdown(
+                                            f"- {flight_info['SRC_CITY']} to {flight_info['DST_CITY']} - {option['user_count']} users (ID: {option['item_id']})")
                         else:
                             st.error("No segment data available.")
     else:
         st.error("Could not load flight data.")
 
 with tab2:
-    st.markdown('<p class="sub-header">Generate Email Campaign</p>', unsafe_allow_html=True)
-    
+    st.markdown('<p class="sub-header">Generate Email Campaign</p>',
+                unsafe_allow_html=True)
+
     if 'selected_flight_id' not in st.session_state or 'flight_details' not in st.session_state:
-        st.info("Please select a flight and analyze a user segment first (in the previous tab)")
+        st.info(
+            "Please select a flight and analyze a user segment first (in the previous tab)")
     else:
         selected_flight_id = st.session_state['selected_flight_id']
         flight_details = st.session_state['flight_details']
         user_list = st.session_state.get('user_list', [])
-        
+
         st.markdown(f"""
         <div class="info-box">
         Ready to generate email campaign for {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} targeting {len(user_list)} users
         </div>
         """, unsafe_allow_html=True)
-        
+
         flight_id_input = st.text_input(
             "Flight ID:",
             value=selected_flight_id,
             disabled=True
         )
-        
+
         if st.button("Generate Personalized Email", use_container_width=True):
             with st.spinner("Generating personalized email content..."):
                 # Call the Bedrock Agent
                 email_content = generate_email_with_agent(selected_flight_id)
-                
+
                 if email_content:
                     st.session_state['generated_email'] = email_content
-                    
+
                     # Try to extract subject line using common patterns
                     subject_line = ""
                     if "Subject:" in email_content:
-                        subject_line = email_content.split("Subject:")[1].split("\n")[0].strip()
+                        subject_line = email_content.split(
+                            "Subject:")[1].split("\n")[0].strip()
                     elif "SUBJECT:" in email_content:
-                        subject_line = email_content.split("SUBJECT:")[1].split("\n")[0].strip()
-                    
-                    st.markdown(f'<div class="success-box">✅ Email campaign generated successfully!</div>', unsafe_allow_html=True)
-                    
+                        subject_line = email_content.split(
+                            "SUBJECT:")[1].split("\n")[0].strip()
+
+                    st.markdown(
+                        f'<div class="success-box">✅ Email campaign generated successfully!</div>', unsafe_allow_html=True)
+
                     # Show email preview
                     st.subheader("Email Preview")
-                    
+
                     # Display in a nice format with tabs for different views
-                    preview_tab1, preview_tab2 = st.tabs(["Formatted View", "Raw Text"])
-                    
+                    preview_tab1, preview_tab2 = st.tabs(
+                        ["Formatted View", "Raw Text"])
+
                     with preview_tab1:
                         # Try to extract and format the email nicely
                         if subject_line:
                             st.markdown(f"### {subject_line}")
-                        
+
                         # Format the body - replace newlines with HTML breaks for better display
                         email_body = email_content
                         if subject_line:
                             # Remove the subject line from the body if we extracted it
-                            email_body = email_body.replace(f"Subject: {subject_line}", "")
-                            email_body = email_body.replace(f"SUBJECT: {subject_line}", "")
-                        
+                            email_body = email_body.replace(
+                                f"Subject: {subject_line}", "")
+                            email_body = email_body.replace(
+                                f"SUBJECT: {subject_line}", "")
+
                         # Convert markdown-like formatting to actual markdown
-                        email_body = email_body.replace("**", "**").replace("__", "**")
-                        
+                        email_body = email_body.replace(
+                            "**", "**").replace("__", "**")
+
                         st.markdown(email_body)
-                    
+
                     with preview_tab2:
                         # Show the raw text
-                        st.text_area("Email Content", email_content, height=400)
-                    
+                        st.text_area("Email Content",
+                                     email_content, height=400)
+
                     # Download button
                     st.download_button(
                         label="Download Email Content",
@@ -496,11 +549,12 @@ with tab2:
                         file_name=f"wanderly_campaign_{flight_details['DST_CITY'].lower().replace(' ', '_')}.txt",
                         mime="text/plain"
                     )
-                    
+
                     # User list download
                     st.subheader("Target User List")
-                    st.markdown(f"This campaign will target **{len(user_list)}** users")
-                    
+                    st.markdown(
+                        f"This campaign will target **{len(user_list)}** users")
+
                     # Convert user list to CSV for download
                     user_csv = "USER_ID\n" + "\n".join(user_list)
                     st.download_button(
@@ -510,9 +564,11 @@ with tab2:
                         mime="text/csv"
                     )
                 else:
-                    st.error("Failed to generate email content. Please try again.")
-        
+                    st.error(
+                        "Failed to generate email content. Please try again.")
+
         # Display previously generated email if available
         if 'generated_email' in st.session_state:
             st.subheader("Previously Generated Email")
-            st.text_area("Email Content", st.session_state['generated_email'], height=300)
+            st.text_area("Email Content",
+                         st.session_state['generated_email'], height=300)
