@@ -176,8 +176,11 @@ def read_s3_json(bucket, key):
 
 
 def generate_email_with_agent(segment_id):
-    """Generate email content using Bedrock Agent - robust to handle any event ordering"""
+    """Generate email content using Bedrock Agent with proper content extraction"""
     session_id = f"demo-session-{int(time.time())}"
+    
+    # Display a message for debugging
+    st.info("Connecting to Bedrock Agent... This may take a moment.")
     
     # Define mock response directly
     mock_response = """Subject: Exclusive Deal: Fly from Manila to London This March!
@@ -218,79 +221,93 @@ The Wanderly Team"""
             enableTrace=True
         )
         
-        # Handle EventStream response
+        # First, try to process the streaming response
         if 'completion' in response:
             event_stream = response['completion']
-            full_text = ""
-            chunks_found = 0
+            raw_content = ""
             
-            # Process each event in the stream
+            # Collect all content from the stream
             for event in event_stream:
-                # Check for text content in this event using different patterns
-                text_found = False
-                
-                # Pattern 1: Standard chunk->message->content structure
-                if 'chunk' in event:
-                    chunk = event['chunk']
-                    if 'message' in chunk:
-                        message = chunk['message']
-                        if 'content' in message:
-                            content = message['content']
-                            # Check if content is a list of objects
-                            if isinstance(content, list) and len(content) > 0:
-                                for item in content:
-                                    if 'text' in item:
-                                        full_text += item['text']
-                                        text_found = True
-                                        chunks_found += 1
-                            # Or if it's a string directly
-                            elif isinstance(content, str):
-                                full_text += content
-                                text_found = True
-                                chunks_found += 1
-                
-                # Pattern 2: Look for text in any nested structure
-                if not text_found:
-                    def extract_text(obj, path=""):
-                        """Recursively search for text content in nested dictionaries"""
-                        extracted = ""
-                        
-                        if isinstance(obj, dict):
-                            # Check for common patterns
-                            if 'text' in obj and isinstance(obj['text'], str):
-                                return obj['text']
-                            
-                            # Search all keys
-                            for key, value in obj.items():
-                                result = extract_text(value, f"{path}.{key}")
-                                if result:
-                                    extracted += result
-                        
-                        elif isinstance(obj, list):
-                            for i, item in enumerate(obj):
-                                result = extract_text(item, f"{path}[{i}]")
-                                if result:
-                                    extracted += result
-                        
-                        return extracted
-                    
-                    additional_text = extract_text(event)
-                    if additional_text:
-                        full_text += additional_text
-                        chunks_found += 1
+                raw_content += str(event)
             
-            # If we found any chunks with text, return the assembled text
-            if chunks_found > 0:
-                return full_text
-            else:
-                # No text found in any event
-                return mock_response
+            # Based on your example output, we need to extract the email from the mixed content
+            # The email usually starts with "Subject:" and ends with common signatures
+            import re
+            
+            # Try to find a subject line first
+            subject_match = re.search(r'Subject: ([^\n]+)', raw_content)
+            if subject_match:
+                # Found a subject line - extract from there to the end of the content
+                email_start_idx = raw_content.find(subject_match.group(0))
+                if email_start_idx >= 0:
+                    raw_email = raw_content[email_start_idx:]
+                    
+                    # Try to find where the actual email ends (before any system content/metadata)
+                    end_markers = [
+                        "This email campaign highlights",  # From your example
+                        "The Wanderly Team</document_content>", 
+                        "<function_results>",
+                        "<result>",
+                        "<tool_name>",
+                        "<stdout>",
+                        "\"system\":"
+                    ]
+                    
+                    for marker in end_markers:
+                        end_idx = raw_email.find(marker)
+                        if end_idx > 0:
+                            # Found a valid end marker, but we want to keep the content before it
+                            # Move back to find the last newline before this marker
+                            last_nl = raw_email.rfind("\n\n", 0, end_idx)
+                            if last_nl > 0:
+                                raw_email = raw_email[:last_nl].strip()
+                            else:
+                                raw_email = raw_email[:end_idx].strip()
+                            break
+                    
+                    return raw_email
+            
+            # If we couldn't find a subject line, try looking for the entire email structure
+            email_pattern = r'Subject: .*?(?:Best regards,|Sincerely,|Warm regards,|The Wanderly Team).*?(?:\n\n|\Z)'
+            email_match = re.search(email_pattern, raw_content, re.DOTALL)
+            if email_match:
+                return email_match.group(0).strip()
+            
+            # If still no match, look for any content that resembles an email
+            lines = raw_content.split('\n')
+            cleaned_lines = []
+            in_email = False
+            
+            for line in lines:
+                # Start capturing at "Subject:" line
+                if "Subject:" in line:
+                    in_email = True
+                    cleaned_lines.append(line)
+                # Stop after common signatures
+                elif in_email and any(marker in line for marker in ["Best regards", "Sincerely", "Warm regards", "The Wanderly Team"]):
+                    cleaned_lines.append(line)
+                    # Add one more line for signature
+                    if lines.index(line) + 1 < len(lines):
+                        cleaned_lines.append(lines[lines.index(line) + 1])
+                    break
+                # Otherwise keep appending if we're in the email section
+                elif in_email:
+                    cleaned_lines.append(line)
+            
+            if cleaned_lines:
+                return '\n'.join(cleaned_lines)
+            
+            # If we can't extract a properly formatted email, just return the raw content
+            # but limit it to a reasonable size
+            if len(raw_content) > 10000:
+                return raw_content[:10000] + "...[truncated]"
+            return raw_content
         else:
             # No completion in response
             return mock_response
                 
     except Exception as e:
-        # If any error occurs, return mock
+        st.error(f"Error generating email: {str(e)}")
         return mock_response
     
 # For testing/debugging only
