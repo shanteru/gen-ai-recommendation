@@ -203,8 +203,7 @@ Format the email with emojis and bullet points for easy readability."""
     # Create a fresh client for each call
     bedrock_agent_runtime = boto3.client(
         service_name='bedrock-agent-runtime',
-        region_name='us-east-1',
-        endpoint_url='https://bedrock-agent-runtime.us-east-1.amazonaws.com'
+        region_name='us-east-1'
     )
     
     # DEBUG: Log the client configuration
@@ -213,7 +212,7 @@ Format the email with emojis and bullet points for easy readability."""
     st.info(f"Session ID: {session_id}")
     
     try:
-        # Make the direct API call
+        # Make the API call
         response = bedrock_agent_runtime.invoke_agent(
             agentId=AGENT_ID,
             agentAliasId=AGENT_ALIAS_ID,
@@ -221,30 +220,55 @@ Format the email with emojis and bullet points for easy readability."""
             inputText=prompt
         )
         
-        # Handle the streaming response
+        # Handle the event stream correctly
         full_response = ""
-        for chunk in response['chunks']:
-            # Extract message content from chunk
-            if 'message' in chunk:
-                content = chunk['message'].get('content', [])
-                for item in content:
-                    if 'text' in item:
-                        full_response += item['text']
+        
+        # The completion field contains the EventStream object
+        event_stream = response.get('completion')
+        
+        # Process the event stream if it exists
+        if event_stream:
+            for event in event_stream:
+                # Check if the event has a 'chunk' attribute
+                if hasattr(event, 'chunk'):
+                    chunk = event.chunk
+                    # Check if the chunk has a 'bytes' attribute
+                    if hasattr(chunk, 'bytes'):
+                        # Decode the bytes content to text
+                        chunk_bytes = chunk.bytes
+                        try:
+                            chunk_text = chunk_bytes.decode('utf-8')
+                            full_response += chunk_text
+                        except:
+                            st.error("Failed to decode chunk bytes")
+                    # Or check if it has a message attribute
+                    elif hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                        for content_item in chunk.message.content:
+                            if hasattr(content_item, 'text'):
+                                full_response += content_item.text
         
         if full_response:
             return full_response
-        else:
-            # If we didn't get a text response but didn't error
-            st.warning("Agent returned an empty response")
-            return "The agent did not generate any content. Please try again."
-    
+        
+        # If we got response but no content from the event stream
+        if 'chunk' in response:
+            # Try to extract content from the response's chunk
+            chunk = response.get('chunk', {})
+            if 'bytes' in chunk:
+                try:
+                    return chunk['bytes'].decode('utf-8')
+                except:
+                    st.warning("Failed to decode response bytes")
+            
+        # At this point, we need to look at the full response structure
+        st.warning("Could not extract text from response - examining response structure")
+        st.json(str(response))
+        
+        return "Could not extract content from the agent response. Please check the logs for details."
+        
     except Exception as e:
-        # Detailed error handling
         st.error(f"Error invoking agent: {str(e)}")
-        if 'response' in locals():
-            st.json(response)  # Show the raw response for debugging
-        raise e  # Re-raise to see full traceback
-
+        return f"Error: {str(e)}"
 
 # Title
 st.markdown('<p class="main-header">Wanderly Email Campaign Generator</p>',
