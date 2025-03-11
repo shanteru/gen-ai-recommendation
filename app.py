@@ -176,59 +176,96 @@ def read_s3_json(bucket, key):
 
 
 def generate_email_with_agent(segment_id):
+    """Generate email content using Bedrock Agent with better handling of EventStream"""
     session_id = f"demo-session-{int(time.time())}"
     
     # Display a message for debugging
     st.info("Connecting to Bedrock Agent... This may take a moment.")
     
+    # Define mock response directly here so we don't have any undefined functions
+    mock_response = """Subject: Exclusive Deal: Fly from Manila to London This March!
+
+Dear Valued Wanderly Traveler,
+
+We're excited to offer you an exclusive opportunity to explore the historic city of London this March! 
+
+✈️ Manila to London
+🗓️ Travel Period: March 2023
+💰 Special Price: $5,999
+⭐ Duration: 10 days
+🛫 Airline: ButterflyWing Express
+
+During your stay, you might enjoy:
+• Visiting the iconic Big Ben and Houses of Parliament
+• Exploring the British Museum's world-class collections
+• Taking a ride on the London Eye for panoramic city views
+• Enjoying afternoon tea at a traditional English tearoom
+
+Book now at https://demobooking.demo.co and use promo code LONDON23 to secure this special offer!
+
+Best regards,
+The Wanderly Team"""
+    
     try:
         # Check if Agent ID and Alias ID are provided
         if not AGENT_ID or AGENT_ID == '':
             st.warning("Agent ID is not configured. Using mock response for demo purposes.")
-            return mock_email_response()
+            return mock_response
             
-        # First, ask the agent to generate an email for the segment
-        response = bedrock_agent_client.invoke_agent(
-            agentId=AGENT_ID,
-            agentAliasId=AGENT_ALIAS_ID,
-            sessionId=session_id,
-            inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}",
-            enableTrace=True
-        )
+        # Invoke the agent
+        try:
+            response = bedrock_agent_client.invoke_agent(
+                agentId=AGENT_ID,
+                agentAliasId=AGENT_ALIAS_ID,
+                sessionId=session_id,
+                inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}",
+                enableTrace=True
+            )
+        except Exception as invoke_error:
+            st.error(f"Error invoking agent: {str(invoke_error)}")
+            return mock_response
         
-        # Handle EventStream response - this is the key fix
-        if 'completion' in response and hasattr(response['completion'], 'read'):
-            # It's an EventStream, we need to process it differently
-            full_response = ""
-            event_stream = response['completion']
-            
-            # Process each event in the stream
-            for event in event_stream:
-                # Convert the event to bytes then to string to inspect it
-                event_json = json.loads(event.to_json())
+        # Log raw response type for debugging
+        st.write(f"Debug - Response type: {type(response)}")
+        
+        # Handle EventStream response
+        if 'completion' in response:
+            try:
+                event_stream = response['completion']
+                full_text = ""
                 
-                # Check if this event has the message content
-                if 'chunk' in event_json and 'message' in event_json['chunk']:
-                    content = event_json['chunk']['message'].get('content', [])
-                    if content and isinstance(content, list) and len(content) > 0:
-                        if 'text' in content[0]:
-                            full_response += content[0]['text']
-            
-            if full_response:
-                return full_response
-            else:
-                st.warning("Could not extract text from EventStream response")
-                return mock_email_response()
+                # Process each event in the stream
+                for event in event_stream:
+                    # Convert to JSON for inspection
+                    event_json = json.loads(event.to_json())
+                    
+                    # Try to extract text
+                    if 'chunk' in event_json and 'message' in event_json['chunk']:
+                        content = event_json['chunk']['message'].get('content', [])
+                        if content and isinstance(content, list) and len(content) > 0:
+                            if 'text' in content[0]:
+                                full_text += content[0]['text']
                 
+                if full_text:
+                    return full_text
+                else:
+                    st.warning("Could not extract text from events")
+                    return mock_response
+                    
+            except Exception as stream_error:
+                st.error(f"Error processing stream: {str(stream_error)}")
+                # Print full raw response for debugging
+                st.code(str(response))
+                return mock_response
         else:
-            # Handle non-streaming response (though it appears you're getting streaming)
-            st.warning("Non-streaming response detected, using fallback parsing")
-            return mock_email_response()
-            
+            st.warning("Response doesn't contain completion data")
+            # Print full raw response for debugging
+            st.code(str(response))
+            return mock_response
+                
     except Exception as e:
-        st.error(f"Error invoking Bedrock agent: {str(e)}")
-        return mock_email_response()
-
+        st.error(f"Error generating email: {str(e)}")
+        return mock_response
 
 # For testing/debugging only
 def debug_event_stream(segment_id):
