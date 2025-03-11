@@ -1,0 +1,107 @@
+openapi: "3.0.1"
+info:
+  title: "EmailMarketingAgent API"
+  description: "API for generating personalized email content based on user segments"
+  version: "1.0.0"
+paths:
+  /generateEmailContent:
+    post:
+      description: "Generate personalized email content for a specific user segment"
+      operationId: "generateEmailContent"
+      parameters:
+        - name: "segmentId"
+          in: "query"
+          description: "ID of the user segment to generate content for"
+          required: true
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "Successfully generated email content"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailContent"
+        "404":
+          description: "API path not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: "Internal server error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    EmailContent:
+      type: "object"
+      properties:
+        segmentId:
+          type: "string"
+          description: "ID of the user segment"
+        userCount:
+          type: "integer"
+          description: "Number of users in the segment"
+        userTierDistribution:
+          type: "object"
+          description: "Distribution of user membership tiers"
+          additionalProperties:
+            type: "integer"
+        flightDetails:
+          type: "object"
+          properties:
+            itemId:
+              type: "string"
+              description: "Unique identifier for the flight"
+            source:
+              type: "string"
+              description: "Departure city"
+            destination:
+              type: "string" 
+              description: "Arrival city"
+            airline:
+              type: "string"
+              description: "Airline name"
+            duration:
+              type: "integer"
+              description: "Flight duration in days"
+            price:
+              type: "number"
+              description: "Flight price"
+            promotion:
+              type: "string"
+              description: "Promotion availability (Yes/No)"
+            month:
+              type: "string"
+              description: "Flight month"
+            discountForMembers:
+              type: "number"
+              description: "Discount percentage for members"
+        error:
+          type: "string"
+          description: "Error message if applicable"
+        availablePromotions:
+          type: "array"
+          description: "List of available promotional flights if requested flight is not found"
+          items:
+            type: "object"
+            properties:
+              ITEM_ID:
+                type: "string"
+              SRC_CITY:
+                type: "string"
+              DST_CITY:
+                type: "string"
+              AIRLINE:
+                type: "string"
+              MONTH:
+                type: "string"
+    ErrorResponse:
+      type: "object"
+      properties:
+        error:
+          type: "string"
+          description: "Error message"

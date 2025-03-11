@@ -1,0 +1,13 @@
+version: '3'
+services:
+  streamlit-app:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount your AWS credentials from your local machine (more secure approach)
+      - ~/.aws:/root/.aws
+    environment:
+      - AWS_REGION=us-east-1
+      - AGENT_ID=your-agent-id
+      - AGENT_ALIAS_ID=your-agent-alias-id
