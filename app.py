@@ -5,7 +5,7 @@ import json
 import time
 import os
 from io import StringIO
-
+from langchain_community.chat_models import BedrockChat
 
 
 # Set up page config
@@ -175,55 +175,87 @@ def read_s3_json(bucket, key):
 # Function to interact with Bedrock Agent
 
 
-def generate_email_with_agent(segment_id):
+def generate_email_with_agent(segment_id, customization=""):
     """Generate email content from Bedrock Agent and extract just the clean email text"""
     session_id = f"demo-session-{int(time.time())}"
-    
-    # Define mock response for fallback
-    mock_response = """Subject: Exclusive Deal: Fly from Manila to London This March!
+
+    # Get flight details from session state for mock response
+    flight_details = st.session_state.get('flight_details', {})
+    src_city = flight_details.get('SRC_CITY', 'Unknown City')
+    dst_city = flight_details.get('DST_CITY', 'Unknown City')
+    airline = flight_details.get('AIRLINE', 'Unknown Airline')
+    month = flight_details.get('MONTH', 'Unknown Month')
+    price = flight_details.get('DYNAMIC_PRICE', 9999)
+    duration = flight_details.get('DURATION_DAYS', 10)
+
+    # Create dynamic mock response using flight details
+    mock_response = f"""Subject: Exclusive Deal: Fly from {src_city} to {dst_city} This {month}!
 
 Dear Valued Wanderly Traveler,
 
-We're excited to offer you an exclusive opportunity to explore the historic city of London this March! 
+We're excited to offer you an exclusive opportunity to explore the vibrant city of {dst_city} this {month}! 
 
-✈️ Manila to London
-🗓️ Travel Period: March 2023
-💰 Special Price: $5,999
-⭐ Duration: 10 days
-🛫 Airline: ButterflyWing Express
+✈️ {src_city} to {dst_city}
+🗓️ Travel Period: {month} 2023
+💰 Special Price: ${price:,}
+⭐ Duration: {duration} days
+🛫 Airline: {airline}
 
 During your stay, you might enjoy:
-• Visiting the iconic Big Ben and Houses of Parliament
-• Exploring the British Museum's world-class collections
-• Taking a ride on the London Eye for panoramic city views
-• Enjoying afternoon tea at a traditional English tearoom
+- Exploring the local culture and attractions
+- Discovering the city's hidden gems
+- Experiencing the local cuisine
+- Creating unforgettable memories
 
-Book now at https://demobooking.demo.co and use promo code LONDON23 to secure this special offer!
+Book now at https://demobooking.demo.co and use promo code {dst_city.upper().replace(' ', '')}23 to secure this special offer!
 
 Best regards,
 The Wanderly Team"""
-    
+
+    # Create chat model for token counting
+    chat_model = BedrockChat(
+        client=bedrock_agent_client,
+        model_id="anthropic.claude-3-haiku-20240307-v1:0"
+    )
+
+    # Build input text with customization
+    input_text = f"Generate an email marketing campaign for flight segment ID {segment_id}"
+    if customization.strip():
+        input_text += f"\n\nCustomization preferences:\n{customization}"
+
+    # Count input tokens
+    input_tokens = chat_model.get_num_tokens(input_text)
+
     try:
         # Check if Agent ID and Alias ID are provided
         if not AGENT_ID or AGENT_ID == '':
-            st.warning("Agent ID is not configured. Using mock response for demo purposes.")
-            return mock_response
-            
+            st.warning(
+                "Agent ID is not configured. Using mock response for demo purposes.")
+            mock_tokens = chat_model.get_num_tokens(mock_response)
+            return {
+                'content': mock_response,
+                'tokens': {
+                    'input': input_tokens,
+                    'output': mock_tokens,
+                    'total': input_tokens + mock_tokens
+                }
+            }
+
         # Invoke the agent
         response = bedrock_agent_client.invoke_agent(
             agentId=AGENT_ID,
             agentAliasId=AGENT_ALIAS_ID,
             sessionId=session_id,
-            inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}",
+            inputText=input_text,
             enableTrace=True
         )
-        
+
         # Process the response
         if 'completion' in response:
             event_stream = response['completion']
             raw_content = ""
             email_content = ""
-            
+
             # Look for chunks that contain the bytes field - these have the actual email content
             for event in event_stream:
                 if 'chunk' in event and 'bytes' in event['chunk']:
@@ -241,7 +273,7 @@ The Wanderly Team"""
                 else:
                     # Collect other content for fallback
                     raw_content += str(event)
-            
+
             # If we found email content in the bytes field
             if email_content:
                 # Clean up the email content
@@ -252,112 +284,103 @@ The Wanderly Team"""
                     clean_email = email_parts[0].strip()
                 else:
                     clean_email = email_content.strip()
-                
+
                 # 2. Format special tags like <call_to_action> to look better
                 import re
                 # Replace XML-like tags with formatted text
-                clean_email = re.sub(r'<call_to_action>(.*?)</call_to_action>', 
-                                     r'\n--- Call to Action ---\n\1\n-------------------\n', 
+                clean_email = re.sub(r'<call_to_action>(.*?)</call_to_action>',
+                                     r'\n--- Call to Action ---\n\1\n-------------------\n',
                                      clean_email)
-                
+
                 # 3. Replace any other placeholder-like elements
-                clean_email = clean_email.replace("[Customer]", "Valued Customer")
-                clean_email = clean_email.replace("[Member/Gold]", "Valued Member")
+                clean_email = clean_email.replace(
+                    "[Customer]", "Valued Customer")
+                clean_email = clean_email.replace(
+                    "[Member/Gold]", "Valued Member")
                 clean_email = clean_email.replace("[Book Now]", "BOOK NOW")
-                
-                return clean_email
-            
+
+                # Get token counts
+                output_tokens = chat_model.get_num_tokens(clean_email)
+
+                return {
+                    'content': clean_email,
+                    'tokens': {
+                        'input': input_tokens,
+                        'output': output_tokens,
+                        'total': input_tokens + output_tokens
+                    }
+                }
+
             # If we didn't get email content from bytes, try to extract from raw content
             if raw_content:
                 import re
                 # Look for the email content pattern - starting with "Subject:" and ending before analysis
-                email_match = re.search(r'Subject:.*?(?:Best regards,|Sincerely,|Wishing you|The Wanderly Team)[^\n]*', 
-                                       raw_content, re.DOTALL)
+                email_match = re.search(r'Subject:.*?(?:Best regards,|Sincerely,|Wishing you|The Wanderly Team)[^\n]*',
+                                        raw_content, re.DOTALL)
                 if email_match:
-                    return email_match.group(0).strip()
-                
+                    clean_email = email_match.group(0).strip()
+                    output_tokens = chat_model.get_num_tokens(clean_email)
+                    return {
+                        'content': clean_email,
+                        'tokens': {
+                            'input': input_tokens,
+                            'output': output_tokens,
+                            'total': input_tokens + output_tokens
+                        }
+                    }
+
                 # If still not found, try to extract any textResponsePart with Subject
-                text_parts = re.findall(r'"text"\s*:\s*"(Subject:.*?)"', raw_content)
+                text_parts = re.findall(
+                    r'"text"\s*:\s*"(Subject:.*?)"', raw_content)
                 if text_parts:
                     # Unescape and clean up the text
                     combined = ' '.join(text_parts)
                     combined = combined.replace('\\n', '\n')
-                    return combined
-            
+                    output_tokens = chat_model.get_num_tokens(combined)
+                    return {
+                        'content': combined,
+                        'tokens': {
+                            'input': input_tokens,
+                            'output': output_tokens,
+                            'total': input_tokens + output_tokens
+                        }
+                    }
+
             # If all extraction attempts fail, return mock response
-            return mock_response
-        
+            mock_tokens = chat_model.get_num_tokens(mock_response)
+            return {
+                'content': mock_response,
+                'tokens': {
+                    'input': input_tokens,
+                    'output': mock_tokens,
+                    'total': input_tokens + mock_tokens
+                }
+            }
+
         else:
             # No completion in response
-            return mock_response
-                
+            mock_tokens = chat_model.get_num_tokens(mock_response)
+            return {
+                'content': mock_response,
+                'tokens': {
+                    'input': input_tokens,
+                    'output': mock_tokens,
+                    'total': input_tokens + mock_tokens
+                }
+            }
+
     except Exception as e:
         st.error(f"Error generating email: {str(e)}")
-        return mock_response
-    
-# For testing/debugging only
-def debug_event_stream(segment_id):
-    """Debug function to help understand the EventStream structure"""
-    session_id = f"debug-{int(time.time())}"
-    
-    try:
-            st.warning("Response doesn't contain completion data")
-            # Print full raw response for debugging
-            st.code(str(response))
-            return mock_response
-                
-    except Exception as e:
-        st.error(f"Error generating email: {str(e)}")
-        return mock_response
-        response = bedrock_agent_client.invoke_agent(
-            agentId=AGENT_ID,
-            agentAliasId=AGENT_ALIAS_ID,
-            sessionId=session_id,
-            inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}"
-        )
-        
-        st.write("Response structure:", type(response))
-        st.write("Response keys:", list(response.keys()))
-        
-        if 'completion' in response:
-            event_stream = response['completion']
-            st.write("EventStream type:", type(event_stream))
-            
-            # Create a section to display events
-            events_container = st.container()
-            
-            # Process each event
-            event_count = 0
-            full_text = ""
-            
-            for event in event_stream:
-                event_count += 1
-                # Convert to JSON for inspection
-                event_json = json.loads(event.to_json())
-                events_container.write(f"Event {event_count}:")
-                events_container.json(event_json)
-                
-                # Try to extract text
-                if 'chunk' in event_json and 'message' in event_json['chunk']:
-                    content = event_json['chunk']['message'].get('content', [])
-                    if content and isinstance(content, list) and len(content) > 0:
-                        if 'text' in content[0]:
-                            text = content[0]['text']
-                            full_text += text
-                            events_container.write(f"Extracted text: {text}")
-            
-            st.write(f"Processed {event_count} events")
-            if full_text:
-                st.write("Complete extracted text:")
-                st.text_area("Email Content", full_text, height=300)
-            else:
-                st.warning("Could not extract any text from events")
-        
-    except Exception as e:
-        st.error(f"Error during debugging: {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
-        
+        mock_tokens = chat_model.get_num_tokens(mock_response)
+        return {
+            'content': mock_response,
+            'tokens': {
+                'input': input_tokens,
+                'output': mock_tokens,
+                'total': input_tokens + mock_tokens
+            }
+        }
+
 
 # Title
 st.markdown('<p class="main-header">Wanderly Email Campaign Generator</p>',
@@ -554,6 +577,43 @@ with tab2:
             disabled=True
         )
 
+        # Add customization input right before the generate button
+        customization = st.text_area(
+            "Email Customization (Optional)",
+            placeholder="""Specify your preferences for the email:
+- Tone (formal/casual/friendly)
+- Key points to emphasize
+- Special features to highlight
+- Any specific content to include""",
+            help="Your preferences will be used to customize the email content"
+        )
+
+        if st.button("Generate Personalized Email", use_container_width=True):
+            with st.spinner("Generating personalized email content..."):
+                # Call the Bedrock Agent with customization
+                result = generate_email_with_agent(
+                    selected_flight_id, customization)
+                email_content = result['content']
+                token_counts = result['tokens']
+
+                if email_content:
+                    st.session_state['generated_email'] = email_content
+
+                    # Your existing subject line extraction code...
+                    # Keep all the existing email display code...
+
+                    # Add token usage metrics after the email preview
+                    st.markdown("### Token Usage")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Input Tokens", token_counts['input'])
+                    with col2:
+                        st.metric("Output Tokens", token_counts['output'])
+                    with col3:
+                        st.metric("Total Tokens", token_counts['total'])
+
+                    # Keep your existing download buttons and user list code...
+
         if st.button("Generate Personalized Email", use_container_width=True):
             with st.spinner("Generating personalized email content..."):
                 # Call the Bedrock Agent
@@ -636,4 +696,3 @@ with tab2:
             st.subheader("Previously Generated Email")
             st.text_area("Email Content",
                          st.session_state['generated_email'], height=300)
-
