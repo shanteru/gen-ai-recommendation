@@ -6,6 +6,12 @@ import time
 import os
 from io import StringIO
 
+
+# Set AWS credentials explicitly
+os.environ['AWS_ACCESS_KEY_ID'] = 'your_access_key'
+os.environ['AWS_SECRET_ACCESS_KEY'] = 'your_secret_key'
+os.environ['AWS_REGION'] = 'us-east-1'
+
 # Set up page config
 st.set_page_config(
     page_title="Wanderly Email Campaign Generator",
@@ -176,123 +182,90 @@ def read_s3_json(bucket, key):
 def generate_email_with_agent(segment_id):
     session_id = f"demo-session-{int(time.time())}"
 
-    # Show debugging info
-    st.info(f"Connecting to Bedrock Agent... Agent ID: {AGENT_ID[:6]}...")
-
-    # Get flight details to customize the prompting
+    # Get flight details for dynamic content
     flight_df = read_s3_csv(BUCKET_NAME, 'data/travel_items.csv')
     flight_details = None
 
-    if flight_df is not None:
+    if flight_df is not None and segment_id:
         matching_flight = flight_df[flight_df['ITEM_ID'] == segment_id]
         if not matching_flight.empty:
             flight_details = matching_flight.iloc[0]
-            st.info(
-                f"Flight found: {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} ({flight_details['AIRLINE']})")
 
     try:
-        # Create a more specific prompt using flight details
-        prompt = f"Generate an email marketing campaign for flight segment ID {segment_id}"
+        # Create a specific prompt that includes flight details
         if flight_details is not None:
-            prompt = f"Generate an email marketing campaign for flight from {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} with {flight_details['AIRLINE']} in {flight_details['MONTH']}. Use segment ID {segment_id} to retrieve user information."
+            prompt = f"Generate a marketing email for a flight from {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} with {flight_details['AIRLINE']} in {flight_details['MONTH']}. Include compelling reasons to visit {flight_details['DST_CITY']}."
+        else:
+            prompt = f"Generate a marketing email for flight segment ID {segment_id}"
 
-        st.code(prompt, language="text")
-
-        # Debug AWS credentials
-        boto_session = boto3.Session()
-        st.success(f"AWS Region: {boto_session.region_name}")
-
-        # Explicitly verify Bedrock Agent client configuration
+        # Initialize boto3 client explicitly for bedrock-agent-runtime
         agent_client = boto3.client(
-            'bedrock-agent-runtime',
-            region_name='us-east-1'  # Explicitly use us-east-1 for testing
-        )
+            'bedrock-agent-runtime', region_name='us-east-1')
 
         # Call the agent
-        response = agent_client.invoke_agent(
-            agentId=AGENT_ID,
-            agentAliasId=AGENT_ALIAS_ID,
-            sessionId=session_id,
-            inputText=prompt,
-            enableTrace=True
-        )
-
-        # Let's debug the response type
-        st.success(f"Response type: {type(response)}")
-
-        # Stream handling for responses
-        full_response = ""
-
-        # Handle streaming events
         try:
-            for event in response:
-                # Show event type for debugging
-                event_type = type(event).__name__
-                st.info(f"Processing event type: {event_type}")
+            response = agent_client.invoke_agent(
+                agentId=AGENT_ID,
+                agentAliasId=AGENT_ALIAS_ID,
+                sessionId=session_id,
+                inputText=prompt,
+                enableTrace=True
+            )
 
-                # Extract content based on event type
-                if hasattr(event, 'chunk'):
-                    if hasattr(event.chunk, 'message'):
-                        if hasattr(event.chunk.message, 'content'):
-                            for content_item in event.chunk.message.content:
-                                if hasattr(content_item, 'text'):
-                                    full_response += content_item.text
-        except Exception as e:
-            st.error(f"Error processing streaming response: {str(e)}")
+            # Process the streaming response correctly
+            full_response = ""
 
-            # Try alternative approach
+            # Handle the response as a stream of events
             try:
-                # Convert response to a string and extract meaningful parts
-                response_str = str(response)
-                st.code(response_str[:500], language="json")
+                for event in response:
+                    # Process each event in the stream
+                    if hasattr(event, 'chunk'):
+                        chunk = event.chunk
+                        if hasattr(chunk, 'message'):
+                            message = chunk.message
+                            if hasattr(message, 'content'):
+                                for content in message.content:
+                                    if hasattr(content, 'text'):
+                                        full_response += content.text
+            except Exception as stream_error:
+                st.error(f"Error processing stream: {str(stream_error)}")
 
-                # Try to find recognizable text in response
-                import re
-                if "text" in response_str:
-                    matches = re.findall(
-                        r'"text"\s*:\s*"([^"]+)"', response_str)
-                    if matches:
-                        full_response = " ".join(matches)
-            except Exception as e2:
-                st.error(f"Alternative parsing failed: {str(e2)}")
+            if full_response:
+                return full_response
 
-        # Check if we got any response
-        if full_response:
-            return full_response
-        else:
-            st.warning(
-                "No response content extracted. Using dynamic fallback template.")
+        except Exception as invoke_error:
+            st.error(f"Error invoking agent: {str(invoke_error)}")
 
-            # Create dynamic fallback based on flight details
-            if flight_details is not None:
-                src = flight_details['SRC_CITY']
-                dst = flight_details['DST_CITY']
-                airline = flight_details['AIRLINE']
-                month = flight_details['MONTH']
-                price = flight_details['DYNAMIC_PRICE']
+    except Exception as e:
+        st.error(f"Error in generate_email_with_agent: {str(e)}")
 
-                return f"""Subject: Exclusive Deal: Fly from {src} to {dst} This {month}!
+    # If we reach here, something went wrong - use fallback with flight details
+    if flight_details is not None:
+        src = flight_details['SRC_CITY']
+        dst = flight_details['DST_CITY']
+        airline = flight_details['AIRLINE']
+        month = flight_details['MONTH']
+        price = flight_details['DYNAMIC_PRICE']
+        duration = flight_details['DURATION_DAYS']
 
-Dear Valued Wanderly Traveler,
+        return f"""Subject: Experience {dst} this {month} with our Special Offer!
 
-We're excited to offer you an exclusive opportunity to explore {dst} this {month}! 
+Dear Valued Traveler,
+
+We're excited to offer you an exclusive opportunity to explore {dst} this {month}!
 
 ✈️ {src} to {dst}
-🗓️ Travel Period: {month} 2023
-💰 Special Price: ${price}
-⭐ Duration: {flight_details['DURATION_DAYS']} days
+🗓️ Travel Period: {month}
+💰 Price: ${price}
+⭐ Duration: {duration} days
 🛫 Airline: {airline}
 
-Book now at https://demobooking.demo.co and use promo code {dst.upper()}23 to secure this special offer!
+Book now at https://demobooking.demo.co to secure your spot!
 
 Best regards,
 The Wanderly Team"""
-            else:
-                return "Failed to generate email content. Could not retrieve flight details."
 
-    except Exception as e:
-        st.error(f"Error invoking Bedrock agent: {str(e)}")
-        return f"Error: {str(e)}"
+    return "Could not generate email content. Please try again."
 
 
 # Title
