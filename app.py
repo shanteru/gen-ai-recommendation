@@ -176,13 +176,10 @@ def read_s3_json(bucket, key):
 
 
 def generate_email_with_agent(segment_id):
-    """Generate email content using Bedrock Agent with proper content extraction"""
+    """Generate email content from Bedrock Agent and extract just the clean email text"""
     session_id = f"demo-session-{int(time.time())}"
     
-    # Display a message for debugging
-    st.info("Connecting to Bedrock Agent... This may take a moment.")
-    
-    # Define mock response directly
+    # Define mock response for fallback
     mock_response = """Subject: Exclusive Deal: Fly from Manila to London This March!
 
 Dear Valued Wanderly Traveler,
@@ -221,87 +218,75 @@ The Wanderly Team"""
             enableTrace=True
         )
         
-        # First, try to process the streaming response
+        # Process the response
         if 'completion' in response:
             event_stream = response['completion']
             raw_content = ""
+            email_content = ""
             
-            # Collect all content from the stream
+            # Look for chunks that contain the bytes field - these have the actual email content
             for event in event_stream:
-                raw_content += str(event)
+                if 'chunk' in event and 'bytes' in event['chunk']:
+                    # Extract the bytes and decode to text
+                    try:
+                        # This is the most reliable way - the bytes field contains the actual email
+                        content_bytes = event['chunk']['bytes']
+                        if isinstance(content_bytes, bytes):
+                            decoded = content_bytes.decode('utf-8')
+                            email_content += decoded
+                    except Exception as e:
+                        st.warning(f"Error decoding bytes: {str(e)}")
+                        # Fall back to string representation
+                        raw_content += str(event)
+                else:
+                    # Collect other content for fallback
+                    raw_content += str(event)
             
-            # Based on your example output, we need to extract the email from the mixed content
-            # The email usually starts with "Subject:" and ends with common signatures
-            import re
+            # If we found email content in the bytes field
+            if email_content:
+                # Clean up the email content
+                # 1. Remove the analysis part at the end (which starts with double newlines)
+                email_parts = email_content.split("\n\n\n")
+                if len(email_parts) > 1:
+                    # The first part is the actual email
+                    clean_email = email_parts[0].strip()
+                else:
+                    clean_email = email_content.strip()
+                
+                # 2. Format special tags like <call_to_action> to look better
+                import re
+                # Replace XML-like tags with formatted text
+                clean_email = re.sub(r'<call_to_action>(.*?)</call_to_action>', 
+                                     r'\n--- Call to Action ---\n\1\n-------------------\n', 
+                                     clean_email)
+                
+                # 3. Replace any other placeholder-like elements
+                clean_email = clean_email.replace("[Customer]", "Valued Customer")
+                clean_email = clean_email.replace("[Member/Gold]", "Valued Member")
+                clean_email = clean_email.replace("[Book Now]", "BOOK NOW")
+                
+                return clean_email
             
-            # Try to find a subject line first
-            subject_match = re.search(r'Subject: ([^\n]+)', raw_content)
-            if subject_match:
-                # Found a subject line - extract from there to the end of the content
-                email_start_idx = raw_content.find(subject_match.group(0))
-                if email_start_idx >= 0:
-                    raw_email = raw_content[email_start_idx:]
-                    
-                    # Try to find where the actual email ends (before any system content/metadata)
-                    end_markers = [
-                        "This email campaign highlights",  # From your example
-                        "The Wanderly Team</document_content>", 
-                        "<function_results>",
-                        "<result>",
-                        "<tool_name>",
-                        "<stdout>",
-                        "\"system\":"
-                    ]
-                    
-                    for marker in end_markers:
-                        end_idx = raw_email.find(marker)
-                        if end_idx > 0:
-                            # Found a valid end marker, but we want to keep the content before it
-                            # Move back to find the last newline before this marker
-                            last_nl = raw_email.rfind("\n\n", 0, end_idx)
-                            if last_nl > 0:
-                                raw_email = raw_email[:last_nl].strip()
-                            else:
-                                raw_email = raw_email[:end_idx].strip()
-                            break
-                    
-                    return raw_email
+            # If we didn't get email content from bytes, try to extract from raw content
+            if raw_content:
+                import re
+                # Look for the email content pattern - starting with "Subject:" and ending before analysis
+                email_match = re.search(r'Subject:.*?(?:Best regards,|Sincerely,|Wishing you|The Wanderly Team)[^\n]*', 
+                                       raw_content, re.DOTALL)
+                if email_match:
+                    return email_match.group(0).strip()
+                
+                # If still not found, try to extract any textResponsePart with Subject
+                text_parts = re.findall(r'"text"\s*:\s*"(Subject:.*?)"', raw_content)
+                if text_parts:
+                    # Unescape and clean up the text
+                    combined = ' '.join(text_parts)
+                    combined = combined.replace('\\n', '\n')
+                    return combined
             
-            # If we couldn't find a subject line, try looking for the entire email structure
-            email_pattern = r'Subject: .*?(?:Best regards,|Sincerely,|Warm regards,|The Wanderly Team).*?(?:\n\n|\Z)'
-            email_match = re.search(email_pattern, raw_content, re.DOTALL)
-            if email_match:
-                return email_match.group(0).strip()
-            
-            # If still no match, look for any content that resembles an email
-            lines = raw_content.split('\n')
-            cleaned_lines = []
-            in_email = False
-            
-            for line in lines:
-                # Start capturing at "Subject:" line
-                if "Subject:" in line:
-                    in_email = True
-                    cleaned_lines.append(line)
-                # Stop after common signatures
-                elif in_email and any(marker in line for marker in ["Best regards", "Sincerely", "Warm regards", "The Wanderly Team"]):
-                    cleaned_lines.append(line)
-                    # Add one more line for signature
-                    if lines.index(line) + 1 < len(lines):
-                        cleaned_lines.append(lines[lines.index(line) + 1])
-                    break
-                # Otherwise keep appending if we're in the email section
-                elif in_email:
-                    cleaned_lines.append(line)
-            
-            if cleaned_lines:
-                return '\n'.join(cleaned_lines)
-            
-            # If we can't extract a properly formatted email, just return the raw content
-            # but limit it to a reasonable size
-            if len(raw_content) > 10000:
-                return raw_content[:10000] + "...[truncated]"
-            return raw_content
+            # If all extraction attempts fail, return mock response
+            return mock_response
+        
         else:
             # No completion in response
             return mock_response
