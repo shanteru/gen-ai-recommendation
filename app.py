@@ -41,6 +41,30 @@ st.markdown("""
         color: white;
         font-weight: bold;
     }
+    /* Fix for text colors */
+    h1, h2, h3, h4, h5, h6 {
+        color: #1E88E5 !important;
+    }
+    p, li, div {
+        color: #212121 !important;
+    }
+    /* Fix for tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 1px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #F3F4F6;
+        border-radius: 4px 4px 0 0;
+        gap: 1px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1E88E5;
+        color: white;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,18 +123,44 @@ def generate_email_with_agent(segment_id):
             enableTrace=True
         )
         
-        # Extract the response
-        messages = []
-        for event in response.get('completion', {}).get('chunks', []):
-            if 'chunk' in event:
-                chunk = event['chunk']
-                if 'message' in chunk:
-                    content = chunk['message']['content']
-                    if isinstance(content, list) and len(content) > 0:
-                        text = content[0].get('text', '')
-                        messages.append(text)
+        # Extract the response - handle streaming response properly
+        full_response = ""
         
-        return ''.join(messages)
+        # Check response type and handle accordingly
+        if hasattr(response, 'get'):
+            # Non-streaming response
+            chunks = response.get('completion', {}).get('chunks', [])
+            for chunk in chunks:
+                if 'chunk' in chunk and 'message' in chunk['chunk']:
+                    content = chunk['chunk']['message']['content']
+                    if isinstance(content, list) and len(content) > 0:
+                        full_response += content[0].get('text', '')
+        else:
+            # Streaming response
+            for event in response:
+                if hasattr(event, 'chunk') and hasattr(event.chunk, 'message'):
+                    message = event.chunk.message
+                    if hasattr(message, 'content') and len(message.content) > 0:
+                        full_response += message.content[0].text
+        
+        if not full_response:
+            # Fallback for different response formats
+            st.warning("Response format differs from expected. Using alternate parsing method.")
+            
+            # Try to extract directly from the raw response
+            try:
+                import json
+                raw_response = str(response)
+                # Look for text patterns in the raw response
+                if '"text":' in raw_response:
+                    # Extract text between quotes after "text":
+                    import re
+                    text_matches = re.findall(r'"text":\s*"([^"]*)"', raw_response)
+                    full_response = ' '.join(text_matches)
+            except Exception as extract_error:
+                st.error(f"Failed to extract text from response: {extract_error}")
+                
+        return full_response if full_response else "No content could be extracted from the response."
     except Exception as e:
         st.error(f"Error invoking Bedrock agent: {str(e)}")
         return None
