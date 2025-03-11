@@ -176,7 +176,7 @@ def read_s3_json(bucket, key):
 
 
 def generate_email_with_agent(segment_id):
-    """Generate email content using Bedrock Agent with better handling of EventStream"""
+    """Generate email content using Bedrock Agent with correct EventStream handling"""
     session_id = f"demo-session-{int(time.time())}"
     
     # Display a message for debugging
@@ -213,51 +213,108 @@ The Wanderly Team"""
             return mock_response
             
         # Invoke the agent
-        try:
-            response = bedrock_agent_client.invoke_agent(
-                agentId=AGENT_ID,
-                agentAliasId=AGENT_ALIAS_ID,
-                sessionId=session_id,
-                inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}",
-                enableTrace=True
-            )
-        except Exception as invoke_error:
-            st.error(f"Error invoking agent: {str(invoke_error)}")
-            return mock_response
+        response = bedrock_agent_client.invoke_agent(
+            agentId=AGENT_ID,
+            agentAliasId=AGENT_ALIAS_ID,
+            sessionId=session_id,
+            inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}",
+            enableTrace=True
+        )
         
         # Log raw response type for debugging
         st.write(f"Debug - Response type: {type(response)}")
+        st.write("Debug - Response keys:", list(response.keys()))
         
         # Handle EventStream response
         if 'completion' in response:
             try:
                 event_stream = response['completion']
+                st.write(f"Debug - EventStream type: {type(event_stream)}")
+                
                 full_text = ""
                 
-                # Process each event in the stream
+                # Process each event in the stream - direct iteration on EventStream object
                 for event in event_stream:
-                    # Convert to JSON for inspection
-                    event_json = json.loads(event.to_json())
+                    # Print event type for debugging
+                    st.write(f"Debug - Event type: {type(event)}")
+                    st.write(f"Debug - Event dir: {dir(event)[:10]}") # Just show a few attributes
                     
-                    # Try to extract text
-                    if 'chunk' in event_json and 'message' in event_json['chunk']:
-                        content = event_json['chunk']['message'].get('content', [])
-                        if content and isinstance(content, list) and len(content) > 0:
-                            if 'text' in content[0]:
-                                full_text += content[0]['text']
+                    # Handle different event formats based on boto3 version
+                    if hasattr(event, 'chunk'):
+                        # Newer boto3 versions with native object
+                        chunk = event.chunk
+                        if hasattr(chunk, 'message'):
+                            message = chunk.message
+                            if hasattr(message, 'content'):
+                                content = message.content
+                                for item in content:
+                                    if hasattr(item, 'text'):
+                                        full_text += item.text
+                    elif hasattr(event, 'get'):
+                        # Dictionary-like access
+                        chunk = event.get('chunk', {})
+                        message = chunk.get('message', {})
+                        content = message.get('content', [])
+                        if isinstance(content, list) and len(content) > 0:
+                            text = content[0].get('text', '')
+                            full_text += text
+                    
+                    # Add raw event viewing for debugging
+                    st.write("Debug - Raw event:", str(event)[:100] + "...")
                 
                 if full_text:
+                    st.success("Successfully extracted text from EventStream")
                     return full_text
                 else:
-                    st.warning("Could not extract text from events")
+                    # If we couldn't extract text with structured approaches, try raw parsing
+                    st.warning("Structured extraction failed, attempting raw parsing")
+                    
+                    # Reset the event stream (if possible)
+                    if hasattr(event_stream, 'seek'):
+                        event_stream.seek(0)
+                    
+                    # Raw string collection approach
+                    raw_content = ""
+                    for event in event_stream:
+                        raw_content += str(event)
+                    
+                    st.write("Debug - Raw content collected:", len(raw_content), "characters")
+                    
+                    # Try to find text in raw content
+                    import re
+                    text_matches = re.findall(r'"text"\s*:\s*"([^"]+)"', raw_content)
+                    if text_matches:
+                        st.success(f"Found {len(text_matches)} text segments via regex")
+                        extracted_text = ' '.join(text_matches)
+                        return extracted_text
+                    
+                    st.warning("Could not extract text from events, using mock response")
                     return mock_response
                     
             except Exception as stream_error:
                 st.error(f"Error processing stream: {str(stream_error)}")
-                # Print full raw response for debugging
-                st.code(str(response))
+                import traceback
+                st.code(traceback.format_exc())
+                # Print info about the event_stream
+                st.write(f"EventStream info: {type(event_stream)}, dir: {dir(event_stream)[:10]}")
                 return mock_response
         else:
+            st.warning("Response doesn't contain completion data")
+            st.code(str(response))
+            return mock_response
+                
+    except Exception as e:
+        st.error(f"Error generating email: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+        return mock_response
+    
+# For testing/debugging only
+def debug_event_stream(segment_id):
+    """Debug function to help understand the EventStream structure"""
+    session_id = f"debug-{int(time.time())}"
+    
+    try:
             st.warning("Response doesn't contain completion data")
             # Print full raw response for debugging
             st.code(str(response))
@@ -266,13 +323,6 @@ The Wanderly Team"""
     except Exception as e:
         st.error(f"Error generating email: {str(e)}")
         return mock_response
-
-# For testing/debugging only
-def debug_event_stream(segment_id):
-    """Debug function to help understand the EventStream structure"""
-    session_id = f"debug-{int(time.time())}"
-    
-    try:
         response = bedrock_agent_client.invoke_agent(
             agentId=AGENT_ID,
             agentAliasId=AGENT_ALIAS_ID,
