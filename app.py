@@ -547,3 +547,48 @@ with tab2:
             st.subheader("Previously Generated Email")
             st.text_area("Email Content",
                          st.session_state['generated_email'], height=300)
+
+
+# TO BE REMOVED
+
+def debug_agent_response(segment_id):
+    """Simple function to invoke agent and print the raw response for debugging"""
+    import json
+    
+    # Create a simple session ID
+    session_id = f"debug-{int(time.time())}"
+    
+    # Print the request parameters
+    st.write("Request parameters:")
+    st.write({
+        "agentId": AGENT_ID,
+        "agentAliasId": AGENT_ALIAS_ID,
+        "sessionId": session_id,
+        "inputText": f"Generate an email marketing campaign for flight segment ID {segment_id}"
+    })
+    
+    # Invoke the agent and capture the raw response
+    try:
+        response = bedrock_agent_client.invoke_agent(
+            agentId=AGENT_ID,
+            agentAliasId=AGENT_ALIAS_ID,
+            sessionId=session_id,
+            inputText=f"Generate an email marketing campaign for flight segment ID {segment_id}"
+        )
+        
+        # Print the raw response type and content
+        st.write(f"Response type: {type(response)}")
+        st.write("Raw response:")
+        st.code(str(response))
+        
+        # Return the raw response for further inspection
+        return response
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return None
+
+# Add this to your app where you want to test the agent
+if st.button("Debug Agent Response"):
+    with st.spinner("Invoking agent..."):
+        test_segment_id = "TEST-001"  # Or get this from user input
+        raw_response = debug_agent_response(test_segment_id)
