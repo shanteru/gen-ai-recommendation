@@ -120,8 +120,8 @@ st.markdown('<p class="main-header">Wanderly Email Campaign Generator</p>', unsa
 st.markdown("Generate personalized marketing emails for flight promotions")
 st.markdown("---")
 
-# Create tabs for different steps
-tab1, tab2, tab3 = st.tabs(["📋 Select Flight", "👥 User Segment", "✉️ Generate Email"])
+# Create tabs for different steps - only 2 tabs now
+tab1, tab2 = st.tabs(["📋 Select Flight & View Segment", "✉️ Generate Email"])
 
 with tab1:
     st.markdown('<p class="sub-header">1. Select Flight to Promote</p>', unsafe_allow_html=True)
@@ -130,14 +130,21 @@ with tab1:
     flight_df = read_s3_csv(BUCKET_NAME, 'data/travel_items.csv')
     
     if flight_df is not None:
-        # Filter to only show promotions
-        promo_flights = flight_df[flight_df['PROMOTION'] == 'Yes']
+        # Filter to only show March promotions as that's what we have segments for
+        promo_flights = flight_df[(flight_df['PROMOTION'] == 'Yes') & (flight_df['MONTH'] == 'March')]
+        
+        if promo_flights.empty:
+            # If no March promotions, show all promotions as fallback
+            promo_flights = flight_df[flight_df['PROMOTION'] == 'Yes']
+            st.warning("Note: Segmentation data is only available for March promotions. Other months shown as reference.")
         
         if promo_flights.empty:
             st.warning("No promotional flights found.")
         else:
             # Display flights as a table
             st.markdown('<div class="info-box">Select one of the available promotional flights below:</div>', unsafe_allow_html=True)
+            
+            # Display table with flight IDs
             st.dataframe(
                 promo_flights[['ITEM_ID', 'SRC_CITY', 'DST_CITY', 'AIRLINE', 'MONTH', 'DYNAMIC_PRICE']].reset_index(drop=True),
                 column_config={
@@ -151,137 +158,130 @@ with tab1:
                 use_container_width=True
             )
             
-            # Select a flight
-            selected_flight_id = st.selectbox(
-                "Choose a flight to create a campaign for:",
-                options=promo_flights['ITEM_ID'].tolist(),
-                format_func=lambda x: f"{promo_flights[promo_flights['ITEM_ID']==x]['SRC_CITY'].iloc[0]} to {promo_flights[promo_flights['ITEM_ID']==x]['DST_CITY'].iloc[0]} - {promo_flights[promo_flights['ITEM_ID']==x]['AIRLINE'].iloc[0]}"
+            # Option to directly copy-paste Flight ID
+            selected_flight_id = st.text_input(
+                "Enter Flight ID (copy from table above):",
+                help="Copy the Flight ID directly from the table above"
             )
             
-            if selected_flight_id:
-                flight_details = promo_flights[promo_flights['ITEM_ID'] == selected_flight_id].iloc[0]
-                st.session_state['selected_flight_id'] = selected_flight_id
-                st.session_state['flight_details'] = flight_details
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown('<div class="success-box">Flight details:</div>', unsafe_allow_html=True)
-                    st.markdown(f"""
-                    - **From:** {flight_details['SRC_CITY']}
-                    - **To:** {flight_details['DST_CITY']}
-                    - **Airline:** {flight_details['AIRLINE']}
-                    - **Month:** {flight_details['MONTH']}
-                    - **Duration:** {flight_details['DURATION_DAYS']} days
-                    - **Price:** ${flight_details['DYNAMIC_PRICE']}
-                    """)
-                
-                with col2:
-                    st.markdown('<div class="info-box">Click below to continue to User Segment analysis</div>', unsafe_allow_html=True)
-                    if st.button("Continue to User Segment →", use_container_width=True):
-                        # Switch to the next tab
-                        st.session_state['current_tab'] = 2
-                        st.experimental_rerun()
+            # Button to process the flight ID
+            if st.button("Analyze User Segment", use_container_width=True):
+                if selected_flight_id.strip() == "":
+                    st.error("Please enter a Flight ID first")
+                else:
+                    # Check if flight ID exists
+                    matching_flight = promo_flights[promo_flights['ITEM_ID'] == selected_flight_id]
+                    
+                    if matching_flight.empty:
+                        st.error(f"Flight ID {selected_flight_id} not found in promotional flights")
+                    else:
+                        st.session_state['selected_flight_id'] = selected_flight_id
+                        st.session_state['flight_details'] = matching_flight.iloc[0]
+                        
+                        # Show flight details and segment information on the same page
+                        st.markdown("---")
+                        st.markdown('<p class="sub-header">2. User Segment Details</p>', unsafe_allow_html=True)
+                        
+                        flight_details = matching_flight.iloc[0]
+                        
+                        st.markdown(f"""
+                        <div class="info-box">
+                        Analyzing user segment for flight: {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} ({flight_details['AIRLINE']})
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Load segment data
+                        segments = read_s3_json(BUCKET_NAME, 'segments/batch_segment_input_ab3.json.out')
+                        
+                        if segments:
+                            # Find matching segment
+                            matching_segment = None
+                            for segment in segments:
+                                if segment.get('input', {}).get('itemId') == selected_flight_id:
+                                    matching_segment = segment
+                                    break
+                            
+                            if matching_segment:
+                                user_list = matching_segment.get('output', {}).get('usersList', [])
+                                st.session_state['user_list'] = user_list
+                                
+                                if user_list:
+                                    st.markdown(f'<div class="success-box">✅ Found {len(user_list)} users in this segment!</div>', unsafe_allow_html=True)
+                                    
+                                    # Load user data to show distribution
+                                    user_df = read_s3_csv(BUCKET_NAME, 'data/travel_users.csv')
+                                    if user_df is not None:
+                                        segment_users = user_df[user_df['USER_ID'].isin(user_list)]
+                                        tier_counts = segment_users['MEMBER_TIER'].value_counts()
+                                        
+                                        col1, col2 = st.columns(2)
+                                        
+                                        with col1:
+                                            # Display as pie chart
+                                            st.subheader("User Tier Distribution")
+                                            st.bar_chart(tier_counts)
+                                        
+                                        with col2:
+                                            st.subheader("User Demographics")
+                                            st.markdown(f"""
+                                            - **Total users:** {len(user_list)}
+                                            - **Gold members:** {tier_counts.get('Gold', 0)}
+                                            - **Silver members:** {tier_counts.get('Silver', 0)}
+                                            - **Regular members:** {tier_counts.get('Member', 0)}
+                                            """)
+                                        
+                                        st.markdown('<div class="info-box">Now you can go to the "Generate Email" tab to create an email campaign for this segment</div>', unsafe_allow_html=True)
+                                        
+                                        # Show a sample of user IDs
+                                        with st.expander("View Sample User IDs"):
+                                            st.write(user_list[:10])
+                                            st.info(f"Showing 10 of {len(user_list)} users")
+                                    else:
+                                        st.error("Could not load user data")
+                                else:
+                                    st.warning("No users found in this segment")
+                            else:
+                                # No exact match found, show all available segments
+                                st.warning(f"No exact segment match found for flight ID: {selected_flight_id}")
+                                
+                                # Display all available segments as an alternative
+                                segment_options = []
+                                for segment in segments:
+                                    item_id = segment.get('input', {}).get('itemId')
+                                    user_count = len(segment.get('output', {}).get('usersList', []))
+                                    segment_options.append({"item_id": item_id, "user_count": user_count})
+                                
+                                st.markdown("Available segments:")
+                                for option in segment_options:
+                                    if option["item_id"] in flight_df['ITEM_ID'].values:
+                                        flight_info = flight_df[flight_df['ITEM_ID'] == option["item_id"]].iloc[0]
+                                        st.markdown(f"- {flight_info['SRC_CITY']} to {flight_info['DST_CITY']} - {option['user_count']} users (ID: {option['item_id']})")
+                        else:
+                            st.error("No segment data available.")
     else:
         st.error("Could not load flight data.")
 
 with tab2:
-    st.markdown('<p class="sub-header">2. User Segment Details</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Generate Email Campaign</p>', unsafe_allow_html=True)
     
-    if 'selected_flight_id' not in st.session_state:
-        st.info("Please select a flight first")
+    if 'selected_flight_id' not in st.session_state or 'flight_details' not in st.session_state:
+        st.info("Please select a flight and analyze a user segment first (in the previous tab)")
     else:
         selected_flight_id = st.session_state['selected_flight_id']
         flight_details = st.session_state['flight_details']
-        
-        st.markdown(f"""
-        <div class="info-box">
-        Analyzing user segment for flight: {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} ({flight_details['AIRLINE']})
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Load segment data
-        segments = read_s3_json(BUCKET_NAME, 'segments/batch_segment_input_ab3.json.out')
-        
-        if segments:
-            # Find matching segment
-            matching_segment = None
-            for segment in segments:
-                if segment.get('input', {}).get('itemId') == selected_flight_id:
-                    matching_segment = segment
-                    break
-            
-            if matching_segment:
-                user_list = matching_segment.get('output', {}).get('usersList', [])
-                st.session_state['user_list'] = user_list
-                
-                if user_list:
-                    st.markdown(f'<div class="success-box">✅ Found {len(user_list)} users in this segment!</div>', unsafe_allow_html=True)
-                    
-                    # Load user data to show distribution
-                    user_df = read_s3_csv(BUCKET_NAME, 'data/travel_users.csv')
-                    if user_df is not None:
-                        segment_users = user_df[user_df['USER_ID'].isin(user_list)]
-                        tier_counts = segment_users['MEMBER_TIER'].value_counts()
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            # Display as pie chart
-                            st.subheader("User Tier Distribution")
-                            st.bar_chart(tier_counts)
-                        
-                        with col2:
-                            st.subheader("User Demographics")
-                            st.markdown(f"""
-                            - **Total users:** {len(user_list)}
-                            - **Gold members:** {tier_counts.get('Gold', 0)}
-                            - **Silver members:** {tier_counts.get('Silver', 0)}
-                            - **Regular members:** {tier_counts.get('Member', 0)}
-                            """)
-                        
-                        st.markdown('<div class="info-box">Click below to generate a personalized email campaign for this segment</div>', unsafe_allow_html=True)
-                        if st.button("Generate Email Campaign →", use_container_width=True):
-                            # Switch to the next tab
-                            st.session_state['current_tab'] = 3
-                            st.experimental_rerun()
-                    else:
-                        st.error("Could not load user data")
-                else:
-                    st.warning("No users found in this segment")
-            else:
-                # No exact match found, show all available segments
-                st.warning(f"No exact segment match found for flight ID: {selected_flight_id}")
-                
-                # Display all available segments as an alternative
-                segment_options = []
-                for segment in segments:
-                    item_id = segment.get('input', {}).get('itemId')
-                    user_count = len(segment.get('output', {}).get('usersList', []))
-                    segment_options.append({"item_id": item_id, "user_count": user_count})
-                
-                st.markdown("Available segments:")
-                for option in segment_options:
-                    if option["item_id"] in flight_df['ITEM_ID'].values:
-                        flight_info = flight_df[flight_df['ITEM_ID'] == option["item_id"]].iloc[0]
-                        st.markdown(f"- {flight_info['SRC_CITY']} to {flight_info['DST_CITY']} - {option['user_count']} users (ID: {option['item_id']})")
-        else:
-            st.error("No segment data available.")
-
-with tab3:
-    st.markdown('<p class="sub-header">3. Generate Email Campaign</p>', unsafe_allow_html=True)
-    
-    if 'selected_flight_id' not in st.session_state or 'user_list' not in st.session_state:
-        st.info("Please complete the previous steps first")
-    else:
-        selected_flight_id = st.session_state['selected_flight_id']
-        flight_details = st.session_state['flight_details']
-        user_list = st.session_state['user_list']
+        user_list = st.session_state.get('user_list', [])
         
         st.markdown(f"""
         <div class="info-box">
         Ready to generate email campaign for {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} targeting {len(user_list)} users
         </div>
         """, unsafe_allow_html=True)
+        
+        flight_id_input = st.text_input(
+            "Flight ID:",
+            value=selected_flight_id,
+            disabled=True
+        )
         
         if st.button("Generate Personalized Email", use_container_width=True):
             with st.spinner("Generating personalized email content..."):
@@ -354,24 +354,3 @@ with tab3:
         if 'generated_email' in st.session_state:
             st.subheader("Previously Generated Email")
             st.text_area("Email Content", st.session_state['generated_email'], height=300)
-
-# Initialize tab state if needed
-if 'current_tab' in st.session_state:
-    # JavaScript to switch tabs
-    tab_index = st.session_state['current_tab'] - 1  # 0-based index
-    js = f"""
-    <script>
-        // Wait for DOM to load
-        document.addEventListener('DOMContentLoaded', (event) => {{
-            // Get the tab buttons
-            const tabs = document.querySelectorAll('button[role="tab"]');
-            if (tabs.length > {tab_index}) {{
-                // Click the tab
-                setTimeout(() => tabs[{tab_index}].click(), 100);
-            }}
-        }});
-    </script>
-    """
-    st.markdown(js, unsafe_allow_html=True)
-    # Clear the state after use
-    del st.session_state['current_tab']
