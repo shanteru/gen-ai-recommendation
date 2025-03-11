@@ -7,10 +7,6 @@ import os
 from io import StringIO
 
 
-# Set AWS credentials explicitly
-os.environ['AWS_ACCESS_KEY_ID'] = 'your_access_key'
-os.environ['AWS_SECRET_ACCESS_KEY'] = 'your_secret_key'
-os.environ['AWS_REGION'] = 'us-east-1'
 
 # Set up page config
 st.set_page_config(
@@ -181,91 +177,73 @@ def read_s3_json(bucket, key):
 
 def generate_email_with_agent(segment_id):
     session_id = f"demo-session-{int(time.time())}"
-
-    # Get flight details for dynamic content
+    
+    # Get flight details for dynamic prompting
     flight_df = read_s3_csv(BUCKET_NAME, 'data/travel_items.csv')
     flight_details = None
-
+    
     if flight_df is not None and segment_id:
         matching_flight = flight_df[flight_df['ITEM_ID'] == segment_id]
         if not matching_flight.empty:
             flight_details = matching_flight.iloc[0]
-
-    try:
-        # Create a specific prompt that includes flight details
-        if flight_details is not None:
-            prompt = f"Generate a marketing email for a flight from {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} with {flight_details['AIRLINE']} in {flight_details['MONTH']}. Include compelling reasons to visit {flight_details['DST_CITY']}."
-        else:
-            prompt = f"Generate a marketing email for flight segment ID {segment_id}"
-
-        # Initialize boto3 client explicitly for bedrock-agent-runtime
-        agent_client = boto3.client(
-            'bedrock-agent-runtime', region_name='us-east-1')
-
-        # Call the agent
-        try:
-            response = agent_client.invoke_agent(
-                agentId=AGENT_ID,
-                agentAliasId=AGENT_ALIAS_ID,
-                sessionId=session_id,
-                inputText=prompt,
-                enableTrace=True
-            )
-
-            # Process the streaming response correctly
-            full_response = ""
-
-            # Handle the response as a stream of events
-            try:
-                for event in response:
-                    # Process each event in the stream
-                    if hasattr(event, 'chunk'):
-                        chunk = event.chunk
-                        if hasattr(chunk, 'message'):
-                            message = chunk.message
-                            if hasattr(message, 'content'):
-                                for content in message.content:
-                                    if hasattr(content, 'text'):
-                                        full_response += content.text
-            except Exception as stream_error:
-                st.error(f"Error processing stream: {str(stream_error)}")
-
-            if full_response:
-                return full_response
-
-        except Exception as invoke_error:
-            st.error(f"Error invoking agent: {str(invoke_error)}")
-
-    except Exception as e:
-        st.error(f"Error in generate_email_with_agent: {str(e)}")
-
-    # If we reach here, something went wrong - use fallback with flight details
+    
+    # Create a specific, detailed prompt
     if flight_details is not None:
-        src = flight_details['SRC_CITY']
-        dst = flight_details['DST_CITY']
-        airline = flight_details['AIRLINE']
-        month = flight_details['MONTH']
-        price = flight_details['DYNAMIC_PRICE']
-        duration = flight_details['DURATION_DAYS']
-
-        return f"""Subject: Experience {dst} this {month} with our Special Offer!
-
-Dear Valued Traveler,
-
-We're excited to offer you an exclusive opportunity to explore {dst} this {month}!
-
-✈️ {src} to {dst}
-🗓️ Travel Period: {month}
-💰 Price: ${price}
-⭐ Duration: {duration} days
-🛫 Airline: {airline}
-
-Book now at https://demobooking.demo.co to secure your spot!
-
-Best regards,
-The Wanderly Team"""
-
-    return "Could not generate email content. Please try again."
+        prompt = f"""Generate a marketing email for a flight from {flight_details['SRC_CITY']} to {flight_details['DST_CITY']} with {flight_details['AIRLINE']} in {flight_details['MONTH']}. 
+        
+Price: ${flight_details['DYNAMIC_PRICE']}
+Duration: {flight_details['DURATION_DAYS']} days
+        
+Create a compelling subject line and email body that highlights the attractions of {flight_details['DST_CITY']}. 
+Include a call to action to book through our website https://demobooking.demo.co.
+Format the email with emojis and bullet points for easy readability."""
+    else:
+        prompt = f"Generate a marketing email for flight segment ID {segment_id}. Include a subject line and compelling email body."
+    
+    # Create a fresh client for each call
+    bedrock_agent_runtime = boto3.client(
+        service_name='bedrock-agent-runtime',
+        region_name='us-east-1',
+        endpoint_url='https://bedrock-agent-runtime.us-east-1.amazonaws.com'
+    )
+    
+    # DEBUG: Log the client configuration
+    st.info(f"Agent ID: {AGENT_ID}")
+    st.info(f"Agent Alias ID: {AGENT_ALIAS_ID}")
+    st.info(f"Session ID: {session_id}")
+    
+    try:
+        # Make the direct API call
+        response = bedrock_agent_runtime.invoke_agent(
+            agentId=AGENT_ID,
+            agentAliasId=AGENT_ALIAS_ID,
+            sessionId=session_id,
+            inputText=prompt
+        )
+        
+        # Handle the streaming response
+        full_response = ""
+        for chunk in response['chunks']:
+            # Extract message content from chunk
+            if 'message' in chunk:
+                content = chunk['message'].get('content', [])
+                for item in content:
+                    if 'text' in item:
+                        full_response += item['text']
+        
+        if full_response:
+            return full_response
+        else:
+            # If we didn't get a text response but didn't error
+            st.warning("Agent returned an empty response")
+            return "The agent did not generate any content. Please try again."
+    
+    except Exception as e:
+        # Detailed error handling
+        st.error(f"Error invoking agent: {str(e)}")
+        if 'response' in locals():
+            st.json(response)  # Show the raw response for debugging
+        raise e  # Re-raise to see full traceback
 
 
 # Title
