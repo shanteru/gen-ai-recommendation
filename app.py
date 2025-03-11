@@ -16,54 +16,83 @@ st.set_page_config(
 # Custom CSS for better appearance
 st.markdown("""
 <style>
+    /* Text and heading colors - for dark mode */
     .main-header {
         font-size: 2.5rem;
-        color: #1E88E5;
+        color: #39C0F0 !important;
     }
     .sub-header {
         font-size: 1.5rem;
-        color: #0D47A1;
+        color: #39C0F0 !important;
     }
+    h1, h2, h3, h4, h5, h6 {
+        color: #39C0F0 !important;
+    }
+    p, li, label, div {
+        color: white !important;
+    }
+    .st-bx {
+        color: white !important;
+    }
+    
+    /* Box styles */
     .success-box {
         padding: 1rem;
-        background-color: #E8F5E9;
+        background-color: rgba(46, 125, 50, 0.2);
         border-radius: 0.5rem;
         border-left: 0.5rem solid #4CAF50;
+        color: white !important;
     }
     .info-box {
         padding: 1rem;
-        background-color: #E3F2FD;
+        background-color: rgba(30, 136, 229, 0.2);
         border-radius: 0.5rem;
         border-left: 0.5rem solid #2196F3;
+        color: white !important;
     }
+    
+    /* Button styles */
     .stButton button {
         background-color: #1E88E5;
         color: white;
         font-weight: bold;
     }
-    /* Fix for text colors */
-    h1, h2, h3, h4, h5, h6 {
-        color: #1E88E5 !important;
-    }
-    p, li, div {
-        color: #212121 !important;
-    }
-    /* Fix for tabs */
+    
+    /* Tab styles */
     .stTabs [data-baseweb="tab-list"] {
         gap: 1px;
     }
     .stTabs [data-baseweb="tab"] {
         height: 50px;
         white-space: pre-wrap;
-        background-color: #F3F4F6;
+        background-color: rgba(30, 136, 229, 0.1);
         border-radius: 4px 4px 0 0;
         gap: 1px;
         padding-top: 10px;
         padding-bottom: 10px;
+        color: white !important;
     }
     .stTabs [aria-selected="true"] {
         background-color: #1E88E5;
-        color: white;
+        color: white !important;
+    }
+    
+    /* Input field text */
+    .stTextInput input {
+        color: white !important;
+        background-color: rgba(255, 255, 255, 0.1) !important;
+    }
+    
+    /* Table text */
+    .dataframe {
+        color: white !important;
+    }
+    .dataframe th {
+        color: white !important;
+        background-color: rgba(30, 136, 229, 0.3) !important;
+    }
+    .dataframe td {
+        color: white !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -71,11 +100,36 @@ st.markdown("""
 # Set up AWS clients
 @st.cache_resource
 def get_aws_clients():
-    s3_client = boto3.client('s3')
-    bedrock_agent_client = boto3.client('bedrock-agent-runtime')
-    return s3_client, bedrock_agent_client
+    try:
+        # First, try to use environment variables or instance profile
+        s3_client = boto3.client('s3')
+        
+        # Check if Bedrock agent is available in the region
+        bedrock_regions = boto3.Session().get_available_regions('bedrock-agent-runtime')
+        current_region = boto3.Session().region_name
+        
+        # If the current region doesn't support Bedrock, use us-east-1
+        bedrock_region = current_region if current_region in bedrock_regions else 'us-east-1'
+        
+        bedrock_agent_client = boto3.client(
+            'bedrock-agent-runtime', 
+            region_name=bedrock_region
+        )
+        
+        return s3_client, bedrock_agent_client
+    except Exception as e:
+        st.error(f"Error initializing AWS clients: {str(e)}")
+        # Return dummy clients for UI development
+        from unittest.mock import MagicMock
+        return MagicMock(), MagicMock()
 
-s3_client, bedrock_agent_client = get_aws_clients()
+try:
+    s3_client, bedrock_agent_client = get_aws_clients()
+except Exception as e:
+    st.error(f"Failed to initialize AWS clients: {str(e)}")
+    # Create placeholder clients for UI testing
+    from unittest.mock import MagicMock
+    s3_client, bedrock_agent_client = MagicMock(), MagicMock()
 
 # Configuration
 BUCKET_NAME = 'knowledgebase-bedrock-agent-ab3'
@@ -113,7 +167,38 @@ def read_s3_json(bucket, key):
 # Function to interact with Bedrock Agent
 def generate_email_with_agent(segment_id):
     session_id = f"demo-session-{int(time.time())}"
+    
+    # Display a message for debugging
+    st.info("Connecting to Bedrock Agent... This may take a moment.")
+    
     try:
+        # Check if Agent ID and Alias ID are provided
+        if not AGENT_ID or AGENT_ID == '':
+            st.warning("Agent ID is not configured. Using mock response for demo purposes.")
+            # Return a mock response for demo purposes
+            return f"""Subject: Exclusive Deal: Fly from Manila to London This March!
+
+Dear Valued Wanderly Traveler,
+
+We're excited to offer you an exclusive opportunity to explore the historic city of London this March! 
+
+✈️ Manila to London
+🗓️ Travel Period: March 2023
+💰 Special Price: $5,999
+⭐ Duration: 10 days
+🛫 Airline: ButterflyWing Express
+
+During your stay, you might enjoy:
+• Visiting the iconic Big Ben and Houses of Parliament
+• Exploring the British Museum's world-class collections
+• Taking a ride on the London Eye for panoramic city views
+• Enjoying afternoon tea at a traditional English tearoom
+
+Book now at https://demobooking.demo.co and use promo code LONDON23 to secure this special offer!
+
+Best regards,
+The Wanderly Team"""
+            
         # First, ask the agent to generate an email for the segment
         response = bedrock_agent_client.invoke_agent(
             agentId=AGENT_ID,
@@ -137,25 +222,30 @@ def generate_email_with_agent(segment_id):
                         full_response += content[0].get('text', '')
         else:
             # Streaming response
-            for event in response:
-                if hasattr(event, 'chunk') and hasattr(event.chunk, 'message'):
-                    message = event.chunk.message
-                    if hasattr(message, 'content') and len(message.content) > 0:
-                        full_response += message.content[0].text
+            try:
+                for event in response:
+                    if hasattr(event, 'chunk') and hasattr(event.chunk, 'message'):
+                        message = event.chunk.message
+                        if hasattr(message, 'content') and len(message.content) > 0:
+                            full_response += message.content[0].text
+            except Exception as stream_error:
+                st.error(f"Error processing stream: {str(stream_error)}")
+                # Continue to fallback methods
         
         if not full_response:
             # Fallback for different response formats
             st.warning("Response format differs from expected. Using alternate parsing method.")
             
+            # Convert response to string for inspection
+            response_str = str(response)
+            
             # Try to extract directly from the raw response
             try:
-                import json
-                raw_response = str(response)
                 # Look for text patterns in the raw response
-                if '"text":' in raw_response:
+                if '"text":' in response_str:
                     # Extract text between quotes after "text":
                     import re
-                    text_matches = re.findall(r'"text":\s*"([^"]*)"', raw_response)
+                    text_matches = re.findall(r'"text":\s*"([^"]*)"', response_str)
                     full_response = ' '.join(text_matches)
             except Exception as extract_error:
                 st.error(f"Failed to extract text from response: {extract_error}")
@@ -163,7 +253,29 @@ def generate_email_with_agent(segment_id):
         return full_response if full_response else "No content could be extracted from the response."
     except Exception as e:
         st.error(f"Error invoking Bedrock agent: {str(e)}")
-        return None
+        # For demo purposes, return a mock email
+        return f"""Subject: Exclusive Deal: Fly from Manila to London This March!
+
+Dear Valued Wanderly Traveler,
+
+We're excited to offer you an exclusive opportunity to explore the historic city of London this March! 
+
+✈️ Manila to London
+🗓️ Travel Period: March 2023
+💰 Special Price: $5,999
+⭐ Duration: 10 days
+🛫 Airline: ButterflyWing Express
+
+During your stay, you might enjoy:
+• Visiting the iconic Big Ben and Houses of Parliament
+• Exploring the British Museum's world-class collections
+• Taking a ride on the London Eye for panoramic city views
+• Enjoying afternoon tea at a traditional English tearoom
+
+Book now at https://demobooking.demo.co and use promo code LONDON23 to secure this special offer!
+
+Best regards,
+The Wanderly Team"""
 
 # Title
 st.markdown('<p class="main-header">Wanderly Email Campaign Generator</p>', unsafe_allow_html=True)
